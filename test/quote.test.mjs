@@ -1,0 +1,333 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const q = require('../quote.js');
+
+const colors = { n: '#3a415c', g: '#424866', dg: '#2a3148' };
+const co = {
+  name: 'Southern Concrete Coatings',
+  legal: 'Southern Concrete Coatings LLC',
+  addr: 'Tallahassee, FL',
+  phone: '(850) 766-9992',
+  email: 'mccardlematt@yahoo.com',
+  web: 'www.southernconcretecoatingsllc.com',
+  site: 'https://www.southernconcretecoatingsllc.com/'
+};
+const TEST_TO = 'austin@techsourcedsolutions.com';
+
+test('per-sq-ft garage flake price', () => {
+  const items = q.rewriteQuote('480 sq ft garage flake system in Dominion $6.50 per sq ft');
+  assert.equal(items.length, 1);
+  assert.match(items[0].title, /Garage Floor/);
+  assert.match(items[0].title, /Flake System/);
+  assert.match(items[0].title, /480 sq ft/);
+  assert.equal(items[0].price, 3120);
+  assert.match(items[0].detail, /\$6\.50 per sq ft/);
+});
+
+test('metallic epoxy rate without a dollar sign on the rate words', () => {
+  const items = q.rewriteQuote('220 square feet metallic epoxy at $12 a sq ft');
+  assert.equal(items[0].price, 2640);
+  assert.match(items[0].title, /Metallic Epoxy/);
+});
+
+test('slash rate and commercial kitchen', () => {
+  const items = q.rewriteQuote('1200 sq ft commercial kitchen polyaspartic $8/sq ft');
+  assert.equal(items[0].price, 9600);
+  assert.match(items[0].title, /Commercial Kitchen/);
+  assert.match(items[0].title, /Polyaspartic/);
+});
+
+test('lump sum sealer does not invent a sq ft rate', () => {
+  const items = q.rewriteQuote('seal the patio $450');
+  assert.equal(items[0].price, 450);
+  assert.match(items[0].title, /Patio/);
+  assert.match(items[0].title, /Sealer/);
+});
+
+test('crack repair line', () => {
+  const items = q.rewriteQuote('crack repair on the garage $275');
+  assert.equal(items[0].price, 275);
+  assert.match(items[0].title, /Garage Floor|Crack Repair/);
+});
+
+test('two areas split into two priced lines', () => {
+  const items = q.rewriteQuote('garage 400 sq ft flake $6/sq ft and patio 200 sq ft sealer $3 per sq ft');
+  assert.equal(items.length, 2);
+  assert.equal(items[0].price, 2400);
+  assert.equal(items[1].price, 600);
+  assert.equal(q.totalOf(items), 3000);
+});
+
+test('grind and crack stay one included line', () => {
+  const items = q.rewriteQuote('grind and crack repair included');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].price, null);
+  assert.match(items[0].title + items[0].detail, /Grind|Crack/);
+});
+
+test('structured fields price the floor and spoken notes add a line', () => {
+  const items = q.buildItems({
+    sqft: '480',
+    system: 'Garage floor flake system',
+    color: 'Dominion',
+    prep: 'Diamond grinding, Crack repair',
+    cure: '24 hours',
+    rate: '6.50'
+  }, 'extra moisture mitigation $350');
+  assert.equal(items[0].price, 3120);
+  assert.match(items[0].detail, /Dominion/);
+  assert.match(items[0].detail, /24 hours/);
+  assert.match(items[0].detail, /Diamond grinding/);
+  assert.equal(items[1].price, 350);
+});
+
+test('vertical feet times vertical cost is its own line', () => {
+  const items = q.buildItems({
+    sqft: 480, system: 'Garage floor flake system', rate: 6.5,
+    vertical: 40, vrate: 8
+  }, '');
+  assert.equal(items[0].price, 3120);
+  const vert = items.find((it) => it.title === 'Vertical');
+  assert.ok(vert);
+  assert.equal(vert.price, 320);
+  assert.match(vert.detail, /40 ft at \$8\.00 \/ ft/);
+  assert.equal(q.totalOf(items), 3440);
+  assert.equal(q.parseVertical('480 sq ft garage and 40 vertical feet'), 40);
+  assert.equal(q.parseVerticalRate('40 vertical feet at $8 per vertical ft'), 8);
+  assert.equal(q.parseVertical('480 sq ft only'), null);
+  const bare = q.buildItems({ sqft: 480, system: 'Garage floor flake system', rate: 6.5, vertical: 40 }, '');
+  assert.equal(bare.some((it) => it.title === 'Vertical'), false);
+  const job = {
+    id: 'SCC-V', est: 'SCC-EST-2026-0012', name: 'Pat', address: '1 Call St', email: 'pat@example.com',
+    sqft: 480, vertical: 40, vrate: 8, system: 'Garage floor flake system', rate: 6.5,
+    items, total: 3440, date: 'October 28, 2026'
+  };
+  const html = q.quoteEmailHtml({ co, colors, job, testMode: false, testTo: TEST_TO, logoSrc: 'cid:logo', link: (k) => 'https://script.example/?ans=' + k });
+  const pdf = q.pdfHtml({ co, colors, job, logoSrc: 'logo.png' });
+  for (const doc of [html, pdf]) {
+    assert.match(doc, /Vertical/);
+    assert.match(doc, /40 ft/);
+    assert.match(doc, /\$320\.00/);
+    assert.match(doc, /\$8\.00 \/ ft/);
+  }
+});
+
+test('delivery address ignores the customer while test mode is on', () => {
+  const on = q.deliveryAddress(true, TEST_TO, 'homeowner@example.com', co.email);
+  assert.deepEqual(on, { to: TEST_TO, replyTo: TEST_TO });
+  const off = q.deliveryAddress(false, TEST_TO, 'homeowner@example.com', co.email);
+  assert.equal(off.to, 'homeowner@example.com');
+  assert.equal(off.replyTo, co.email);
+});
+
+test('quote email keeps the estimate and leaves out action buttons', () => {
+  const job = {
+    id: 'SCC-1', est: 'SCC-EST-2026-0001', name: 'Pat Homeowner',
+    address: '1 Call St, Tallahassee, FL', email: 'pat@example.com',
+    sqft: 480, system: 'Garage floor flake system', color: 'Dominion',
+    prep: 'Diamond grinding', cure: '24 hours', rate: 6.5,
+    items: q.buildItems({ sqft: 480, system: 'Garage floor flake system', color: 'Dominion', prep: 'Diamond grinding', cure: '24 hours', rate: 6.5 }, ''),
+    total: 3120, date: 'October 27, 2026'
+  };
+  const html = q.quoteEmailHtml({
+    co, colors, job, testMode: true, testTo: TEST_TO, logoSrc: 'cid:logo',
+    photosHtml: '<img alt="site">',
+    link: (k) => 'https://script.example/?ans=' + k
+  });
+  for (const bit of ['Dominion', '480 sq ft', '$6.50', TEST_TO, 'TEST MODE']) {
+    assert.match(html, new RegExp(bit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  for (const bit of ['A) Approve', 'B) Approve with changes', 'C) Decline', 'Other — send a question', 'Pay now', 'Pay over time', 'Ready to coat']) {
+    assert.doesNotMatch(html, new RegExp(bit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.doesNotMatch(html, /display:block;margin:8px 0;padding:15px/);
+  assert.doesNotMatch(html, /mailto:pat@example.com/i);
+  assert.doesNotMatch(html, /\b(tree|stump|pruning|fielder|oak)\b/i);
+});
+
+test('recap has before, after, and refer-a-neighbor', () => {
+  const html = q.recapEmailHtml({
+    co, colors, testMode: true, testTo: TEST_TO, logoSrc: 'cid:logo',
+    beforeHtml: '<img alt="before">', afterHtml: '<img alt="after">',
+    job: {
+      name: 'Pat', address: '1 Call St', email: 'pat@example.com', est: 'SCC-EST-2026-0001',
+      items: [{ title: 'Garage Floor Flake System', detail: '480 sq ft', price: 3120 }],
+      total: 3120, crewNotes: 'Floor was clear.', response: { avail: 'Weekdays 8-12', when: 'Tuesday' }
+    }
+  });
+  assert.match(html, /Before/);
+  assert.match(html, /After/);
+  assert.match(html, /Refer a neighbor/);
+  assert.match(html, /southernconcretecoatingsllc\.com/);
+  assert.match(html, /TEST MODE/);
+  assert.match(html, new RegExp(TEST_TO.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('response form offers the chosen answer and a time window', () => {
+  const html = q.responseFormHtml({
+    co, colors, ans: 'O', action: 'https://script.example/exec',
+    labels: { A: 'Approved', B: 'Approved with changes', C: 'Declined', O: 'Question / other' },
+    slots: ['Weekdays 8-12', 'Weekdays 12-5', 'Weekends', 'Anytime'],
+    job: { id: 'SCC-1', est: 'SCC-EST-2026-0001', address: '1 Call St' }
+  });
+  assert.match(html, /Question \/ other/);
+  assert.match(html, /name="ans" value="O"/);
+  assert.match(html, /Anytime/);
+  assert.match(html, /When can the crew have the floor/);
+});
+
+test('pay and financing links appear only when settings allow them', () => {
+  const job = {
+    name: 'Pat', address: '1 Call St', email: 'pat@example.com', est: 'SCC-EST-2026-0001',
+    items: [{ title: 'Garage Floor Flake System', detail: '480 sq ft', price: 3120 }],
+    total: 3120, invoice: { amount: '$3,120.00', note: 'Due now' }
+  };
+  const base = { co, colors, job, testMode: false, testTo: TEST_TO, logoSrc: 'cid:logo', link: (k) => 'https://script.example/?ans=' + k };
+  assert.doesNotMatch(q.quoteEmailHtml(base), /Pay now/);
+  const on = Object.assign({}, base, { settings: { payLink: 'https://pay.example/scc', finLink: 'https://finance.example/scc', finMin: 1000 } });
+  assert.doesNotMatch(q.quoteEmailHtml(on), /Pay now/);
+  assert.doesNotMatch(q.quoteEmailHtml(on), /Pay over time/);
+  assert.match(q.invoiceEmailHtml(on), /Pay now/);
+  const small = Object.assign({}, base, { job: Object.assign({}, job, { total: 400, invoice: { amount: '$400.00' } }), settings: { payLink: '', finLink: 'https://finance.example/scc', finMin: 1000 } });
+  assert.doesNotMatch(q.invoiceEmailHtml(small), /Pay over time/);
+});
+
+test('hardness, notes, and AI measure notes never reach a customer-facing render', () => {
+  const shared = {
+    id: 'SCC-1', est: 'SCC-EST-2026-0001', name: 'Pat Homeowner',
+    address: '1 Call St, Tallahassee, FL', email: 'pat@example.com',
+    sqft: 480, system: 'Garage floor flake system', color: 'Dominion',
+    prep: 'Diamond grinding', cure: '24 hours', rate: 6.5,
+    items: [{ title: 'Garage Floor Flake System', detail: '480 sq ft', price: 3120 }],
+    total: 3120, date: 'October 27, 2026',
+    crewNotes: 'Floor was clear.',
+    invoice: { amount: '$3,120.00', note: 'Payment due within 15 days.' },
+    response: { ans: 'A', label: 'Approved', text: 'Please call before noon', avail: 'Weekdays 8-12', when: 'Tuesday' }
+  };
+  function face(extra) {
+    return {
+      co, colors, testMode: false, testTo: TEST_TO, logoSrc: 'cid:logo',
+      settings: { reviewLink: 'https://g.page/r/example/review', payLink: 'https://pay.example/scc', finLink: '', finMin: 1000 },
+      link: (k) => 'https://script.example/?ans=' + k,
+      ans: 'A', action: 'https://script.example/exec',
+      labels: { A: 'Approved', B: 'Approved with changes', C: 'Declined', O: 'Question / other' },
+      slots: ['Weekdays 8-12', 'Weekdays 12-5', 'Weekends', 'Anytime'],
+      photosHtml: '<img alt="site">', beforeHtml: '<img alt="before">', afterHtml: '<img alt="after">',
+      job: Object.assign({}, shared, extra)
+    };
+  }
+  const dirty = {
+    hardness: 8,
+    hardnessHow: 'ZXHARD penny scratch on the north slab',
+    internalNotes: [{ t: '2026-10-27T18:04:00.000Z', text: 'ZXNOTE do not mention the failed scratch' }],
+    aiNote: 'ZXAI double door about 16 ft, two bays, medium confidence',
+    callAnswers: [{ q: 'ZXCALL driveway clear', answer: 'no', callback: true, at: '2026-10-28T00:00:00.000Z' }]
+  };
+  const other = { hardness: 3, hardnessHow: '', internalNotes: [], aiNote: '' };
+  const fns = ['quoteEmailHtml', 'pdfHtml', 'recapEmailHtml', 'invoiceEmailHtml', 'responseFormHtml', 'responseThanksHtml', 'reviewEmailHtml'];
+  for (const name of fns) {
+    const left = q[name](face(dirty));
+    const right = q[name](face(other));
+    assert.equal(left, right, name + ' changed when the hardness value or internal notes changed');
+    assert.doesNotMatch(left, /ZXHARD/, name);
+    assert.doesNotMatch(left, /ZXNOTE/, name);
+    assert.doesNotMatch(left, /ZXAI/, name);
+    assert.doesNotMatch(left, /ZXCALL/, name);
+    assert.doesNotMatch(left, /Mohs/i, name);
+    assert.doesNotMatch(left, /hardnessHow|internalNotes/, name);
+  }
+  const stripped = q.customerJob(Object.assign({}, shared, dirty));
+  assert.equal(stripped.hardness, undefined);
+  assert.equal(stripped.hardnessHow, undefined);
+  assert.equal(stripped.internalNotes, undefined);
+  assert.equal(stripped.aiNote, undefined);
+  assert.equal(stripped.callAnswers, undefined);
+  assert.equal(stripped.crewNotes, 'Floor was clear.');
+  assert.doesNotMatch(q.quoteEmailHtml(face(dirty)), /A\) Approve/);
+  assert.match(q.quoteEmailHtml(face(dirty)), /Dominion/);
+  assert.match(q.pdfHtml(face(dirty)), /Dominion/);
+  assert.match(q.recapEmailHtml(face(dirty)), /Floor was clear/);
+  assert.match(q.invoiceEmailHtml(face(dirty)), /\$3,120\.00/);
+  assert.match(q.responseFormHtml(face(dirty)), /When can the crew have the floor/);
+  assert.match(q.responseThanksHtml(face(dirty)), /Please call before noon/);
+  assert.match(q.reviewEmailHtml(face(dirty)), /Leave a review/);
+  assert.doesNotMatch(q.responseThanksHtml(face(dirty)), /ZXNOTE/);
+});
+
+test('additional notes sit under the total and stay off the recap and review', () => {
+  const note = 'Gate code 12.\n<script>alert(1)</script>';
+  const job = {
+    id: 'SCC-3', est: 'SCC-EST-2026-0003', name: 'Pat Homeowner',
+    address: '1 Call St', email: 'pat@example.com',
+    items: [{ title: 'Garage Floor Flake System', detail: '480 sq ft', price: 3120 }],
+    total: 3120,
+    additionalNotes: note,
+    hardness: 8, hardnessHow: 'ZXHARD', internalNotes: [{ text: 'ZXNOTE' }], aiNote: 'ZXAI',
+    invoice: { amount: '$3,120.00', note: 'Due' },
+    crewNotes: 'Floor was clear.'
+  };
+  const o = {
+    co, colors, job, testMode: false, testTo: TEST_TO, logoSrc: 'cid:logo',
+    link: (k) => 'https://script.example/?ans=' + k,
+    ans: 'A', action: 'https://script.example/exec',
+    labels: { A: 'Approved', B: 'Approved with changes', C: 'Declined', O: 'Question / other' },
+    slots: ['Weekdays 8-12']
+  };
+  for (const name of ['quoteEmailHtml', 'pdfHtml', 'invoiceEmailHtml', 'responseFormHtml']) {
+    const html = q[name](o);
+    assert.match(html, /Additional notes/, name);
+    assert.match(html, /Gate code 12\.<br>/, name);
+    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/, name);
+    assert.doesNotMatch(html, /<script>/, name);
+    assert.doesNotMatch(html, /ZXHARD|ZXNOTE|ZXAI/, name);
+  }
+  const blankJob = Object.assign({}, job, { additionalNotes: '   ' });
+  assert.doesNotMatch(q.quoteEmailHtml(Object.assign({}, o, { job: blankJob })), /Additional notes/);
+  assert.doesNotMatch(q.responseFormHtml(Object.assign({}, o, { job: blankJob })), /Additional notes/);
+  assert.doesNotMatch(q.recapEmailHtml(o), /Gate code 12|Additional notes/);
+  assert.doesNotMatch(q.reviewEmailHtml(o), /Gate code 12|Additional notes/);
+  const kept = q.customerJob(job);
+  assert.equal(kept.additionalNotes, note);
+  assert.equal(kept.hardness, undefined);
+});
+
+test('blank quote fields are omitted and the saved email wording is escaped', () => {
+  const bare = {
+    id: 'SCC-2', est: '', name: '', address: '', email: '',
+    items: [], total: 0
+  };
+  const base = { co, colors, job: bare, testMode: false, testTo: TEST_TO, logoSrc: 'cid:logo', link: (k) => 'https://script.example/?ans=' + k };
+  const plain = q.quoteEmailHtml(base);
+  assert.doesNotMatch(plain, /Dear\s*,/);
+  assert.doesNotMatch(plain, /Prepared for/);
+  assert.match(plain, /Thank you for considering Southern Concrete Coatings for your project/);
+  assert.match(plain, /Sincerely,<br>Southern Concrete Coatings/);
+  const copy = q.quoteEmailCopy({ co, job: { name: 'Pat Homeowner', est: 'SCC-EST-2026-0009', address: '1 Call St' } });
+  assert.equal(copy.subject, 'Your concrete coating estimate from Southern Concrete Coatings - SCC-EST-2026-0009');
+  const custom = q.quoteEmailHtml(Object.assign({}, base, {
+    job: Object.assign({}, bare, {
+      name: 'Pat Homeowner', est: 'SCC-EST-2026-0009', address: '1 Call St',
+      hardness: 8, hardnessHow: 'ZXHARD', internalNotes: [{ text: 'ZXNOTE' }], aiNote: 'ZXAI'
+    }),
+    settings: {
+      quoteBody: 'Hello {name}.\nSee the <script>estimate</script> for {address}.',
+      quoteSubject: 'Estimate {estimate} for {name}',
+      quoteSign: 'Thanks,\nThe crew'
+    }
+  }));
+  assert.match(custom, /Hello Pat Homeowner\.<br>See the &lt;script&gt;estimate&lt;\/script&gt; for 1 Call St\./);
+  assert.match(custom, /Thanks,<br>The crew/);
+  assert.doesNotMatch(custom, /Thank you for considering/);
+  assert.doesNotMatch(custom, /<script>/);
+  assert.doesNotMatch(custom, /ZXHARD|ZXNOTE|ZXAI|Mohs/);
+  const filled = q.quoteEmailCopy({
+    co, job: { name: 'Pat', est: 'SCC-EST-2026-0009', address: '1 Call St', hardness: 8 },
+    settings: { quoteSubject: 'Estimate {estimate}', quoteBody: 'Hardness stays {hardness}.' }
+  });
+  assert.equal(filled.subject, 'Estimate SCC-EST-2026-0009');
+  assert.match(filled.body, /\{hardness\}/);
+  assert.doesNotMatch(filled.body, /\b8\b/);
+});

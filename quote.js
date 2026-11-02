@@ -1,0 +1,606 @@
+/* Quote rewriter, per-sq-ft math, and email copy.
+   Shared by the browser app and Code.gs (Apps Script).
+   No DOM, no secrets. */
+function round2(n){return Math.round(Number(n)*100)/100;}
+function money(v){
+  if(v==null||v===''||isNaN(Number(v)))return '';
+  return '$'+Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function validEmail(e){return /^[^\s@,;]+@[^\s@,;]+\.[a-z]{2,}$/i.test(String(e||'').trim());}
+function formatSq(n){
+  var r=Math.round(Number(n)*10)/10;
+  return r.toLocaleString('en-US',{maximumFractionDigits:1});
+}
+function rwTitle(s){
+  return String(s||'').replace(/\b[a-z]/g,function(c){return c.toUpperCase();})
+    .replace(/\b(And|Of|The|By|To|In|On|At|With|A|For)\b/g,function(w,x,i){return i?w.toLowerCase():w;});
+}
+function rwSentence(s){
+  s=String(s||'').replace(/\s+/g,' ').trim();
+  if(!s)return '';
+  s=s.charAt(0).toUpperCase()+s.slice(1);
+  return /[.!?]$/.test(s)?s:s+'.';
+}
+
+/* Where an email is allowed to go. Test mode never returns the customer. */
+function deliveryAddress(testMode,testTo,customerEmail,businessEmail){
+  if(testMode){
+    if(!testTo)throw new Error('Test mode is on but TEST_TO is empty.');
+    return {to:testTo,replyTo:testTo};
+  }
+  return {to:String(customerEmail||'').trim(),replyTo:businessEmail};
+}
+
+var AREAS=[
+  [/\bgarage\b/,'Garage Floor'],
+  [/\bpool\s*deck\b/,'Pool Deck'],
+  [/\bpatio\b/,'Patio'],
+  [/\bporch\b/,'Porch'],
+  [/\blanai\b|\bscreen(?:ed)?\s+porch\b/,'Lanai'],
+  [/\bwalkway\b|\bsidewalk\b/,'Walkway'],
+  [/\bkitchen\b/,'Commercial Kitchen'],
+  [/\bwarehouse\b|\bindustrial\b/,'Warehouse Floor'],
+  [/\bshowroom\b|\bretail\b|\bcommercial\b/,'Commercial Floor'],
+  [/\bbasement\b/,'Basement Floor'],
+  [/\bdriveway\b/,'Driveway'],
+  [/\bbreezeway\b/,'Breezeway']
+];
+var Q_SYSTEMS=[
+  [/\bpolyaspartic\b/,'Polyaspartic'],
+  [/\bpolyurea\b/,'Polyurea'],
+  [/\bmetallic(?:\s+epoxy)?\b/,'Metallic Epoxy'],
+  [/\bquartz\b/,'Quartz Broadcast'],
+  [/\b(?:full[-\s]?broadcast|flake|vinyl\s*chip|chip\s*system)\b/,'Flake System'],
+  [/\bsolid(?:\s+color)?\s+epoxy\b|\bepoxy\b/,'Epoxy'],
+  [/\bseal(?:er|ing)?\b/,'Concrete Sealer'],
+  [/\bgrind(?:ing)?\b|\bprep\b/,'Concrete Prep']
+];
+var PREPS=[
+  [/\bdiamond\s*grind|\bgrind/,'Diamond Grinding'],
+  [/\bcrack/,'Crack Repair'],
+  [/\bspall|\bpatch/,'Spall Repair'],
+  [/\bmoisture|\bvapor|\bmvt\b/,'Moisture Mitigation'],
+  [/\boil\b/,'Oil Stain Treatment'],
+  [/\bjoint/,'Joint Fill'],
+  [/\bshot\s*blast/,'Shot Blast'],
+  [/\bcoating\s*removal|\bstrip(?:ping)?\b/,'Coating Removal']
+];
+
+function firstLabel(t,list){
+  for(var i=0;i<list.length;i++)if(list[i][0].test(t))return list[i][1];
+  return '';
+}
+function allLabels(t,list){
+  var out=[];
+  for(var i=0;i<list.length;i++)if(list[i][0].test(t)&&out.indexOf(list[i][1])<0)out.push(list[i][1]);
+  return out;
+}
+function parseSqft(raw){
+  var m=String(raw||'').match(/(\d[\d,]*(?:\.\d+)?)\s*(?:sq\.?\s*-?\s*ft|sqft|square\s*feet|sq\.?\s*feet|\bsf\b)/i);
+  return m?parseFloat(m[1].replace(/,/g,'')):null;
+}
+function parseVertical(raw){
+  var s=String(raw||'');
+  var patterns=[
+    /(\d[\d,]*(?:\.\d+)?)\s*(?:ft|feet)\s+(?:of\s+)?vertical\b/i,
+    /(\d[\d,]*(?:\.\d+)?)\s*vertical\s*(?:ft|feet)\b/i,
+    /\bvertical\s*(?:of|is|:)?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:ft|feet)?\b/i
+  ];
+  var i,m,n;
+  for(i=0;i<patterns.length;i++){
+    m=s.match(patterns[i]);
+    if(!m)continue;
+    n=parseFloat(String(m[1]).replace(/,/g,''));
+    if(n>0&&n<100000)return Math.round(n*10)/10;
+  }
+  return null;
+}
+function parseVerticalRate(raw){
+  var s=String(raw||'');
+  var patterns=[
+    /\$\s*(\d+(?:\.\d{1,2})?)\s*(?:per|a|an|\/)\s*vertical\s*(?:ft|foot|feet)\b/i,
+    /(\d+(?:\.\d{1,2})?)\s*(?:dollars|bucks)?\s*(?:per|a|an|\/)\s*vertical\s*(?:ft|foot|feet)\b/i,
+    /vertical\s*(?:at|for|@)\s*\$?\s*(\d+(?:\.\d{1,2})?)\b/i
+  ];
+  var i,m,n;
+  for(i=0;i<patterns.length;i++){
+    m=s.match(patterns[i]);
+    if(!m)continue;
+    n=parseFloat(m[1]);
+    if(n>0&&n<10000)return Math.round(n*100)/100;
+  }
+  return null;
+}
+function parseRate(raw){
+  var s=String(raw||'');
+  var patterns=[
+    /\$\s*(\d+(?:\.\d{1,2})?)\s*(?:per|a|an|\/)\s*(?:sq\.?\s*ft|sqft|square\s*foot|sf)\b/i,
+    /(\d+(?:\.\d{1,2})?)\s*(?:dollars|bucks)\s*(?:per|a|an|\/)\s*(?:sq\.?\s*ft|sqft|square\s*foot|sf)\b/i,
+    /\$\s*(\d+(?:\.\d{1,2})?)\s*\/\s*(?:sq\.?\s*ft|sqft|sf)\b/i,
+    /\$\s*(\d+(?:\.\d{1,2})?)\s*psf\b/i,
+    /(\d+(?:\.\d{1,2})?)\s*(?:a|per)\s*(?:sq\.?\s*ft|sqft|square\s*foot|sf)\b/i
+  ];
+  for(var i=0;i<patterns.length;i++){
+    var m=s.match(patterns[i]);
+    if(m)return parseFloat(m[1]);
+  }
+  return null;
+}
+function parseLump(raw){
+  var s=String(raw||'')
+    .replace(/\$\s*\d+(?:\.\d{1,2})?\s*(?:per|a|an|\/)\s*(?:sq\.?\s*ft|sqft|square\s*foot|sf)\b/ig,' ')
+    .replace(/\$\s*\d+(?:\.\d{1,2})?\s*\/\s*(?:sq\.?\s*ft|sqft|sf)\b/ig,' ')
+    .replace(/\$\s*\d+(?:\.\d{1,2})?\s*psf\b/ig,' ')
+    .replace(/\d+(?:\.\d{1,2})?\s*(?:dollars|bucks)\s*(?:per|a|an|\/)\s*(?:sq\.?\s*ft|sqft|square\s*foot|sf)\b/ig,' ');
+  var m=s.match(/\$\s*(\d[\d,]*(?:\.\d{1,2})?)\s*k?\b/i)||s.match(/(?:^|\s)(\d[\d,]{2,}(?:\.\d{1,2})?)\s*(?:dollars|bucks)\b/i);
+  if(!m)return null;
+  var v=parseFloat(m[1].replace(/,/g,''));
+  if(/k\b/i.test(m[0])&&v<1000)v*=1000;
+  return v;
+}
+function splitQuote(raw){
+  return String(raw||'').split(/\n|;|\+(?!\s*\d)|\band then\b|\balso\b|\band\s+(?=the\s+)?(?=(?:the\s+)?(?:patio|garage|pool|porch|basement|warehouse|kitchen|driveway|lanai|walkway|breezeway|showroom)\b)/i)
+    .map(function(s){return s.trim();})
+    .filter(function(s){return s.length>1;});
+}
+function rwItem(raw){
+  var sqft=parseSqft(raw),rate=parseRate(raw),lump=parseLump(raw);
+  var t=String(raw||'').toLowerCase().replace(/\s+/g,' ').trim();
+  var area=firstLabel(t,AREAS),system=firstLabel(t,Q_SYSTEMS),preps=allLabels(t,PREPS);
+  var title=[area,system].filter(Boolean).join(' ');
+  if(!title&&preps.length)title=preps.join(' & ');
+  if(!title)title=rwTitle(t.replace(/[.]+$/,''))||'Concrete Coating';
+  if(sqft)title+=' — '+formatSq(sqft)+' sq ft';
+  var price=null;
+  if(sqft&&rate)price=round2(sqft*rate);
+  else if(lump!=null)price=lump;
+  var detail=rwSentence(raw);
+  if(sqft&&rate)detail=(detail?detail+' ':'')+formatSq(sqft)+' sq ft at '+money(rate)+' per sq ft.';
+  var extra=preps.filter(function(p){return title.indexOf(p)<0;});
+  if(extra.length)detail='Prep: '+extra.join(', ')+'. '+detail;
+  return {title:title,detail:detail.trim(),price:price};
+}
+function rewriteQuote(raw){
+  return splitQuote(raw).map(rwItem);
+}
+function numOrNull(v){
+  if(v==null||v==='')return null;
+  var n=Number(String(v).replace(/[$,]/g,''));
+  return isNaN(n)?null:n;
+}
+function buildItems(fields,spoken){
+  fields=fields||{};
+  var items=[];
+  var system=String(fields.system||'').trim();
+  var color=String(fields.color||'').trim();
+  var prep=String(fields.prep||'').trim();
+  var cure=String(fields.cure||'').trim();
+  var sqft=numOrNull(fields.sqft);
+  var rate=numOrNull(fields.rate);
+  if(system||color||prep||cure||sqft||rate){
+    var title=system||'Concrete Coating';
+    if(sqft)title+=' — '+formatSq(sqft)+' sq ft';
+    var bits=[];
+    if(color)bits.push('Color / flake: '+color+'.');
+    if(prep)bits.push('Prep: '+prep+'.');
+    if(cure)bits.push('Return to service: '+cure+'.');
+    if(sqft&&rate)bits.push(formatSq(sqft)+' sq ft at '+money(rate)+' per sq ft.');
+    else if(rate)bits.push('Rate: '+money(rate)+' per sq ft.');
+    else if(sqft)bits.push(formatSq(sqft)+' sq ft.');
+    items.push({title:title,detail:bits.join(' '),price:(sqft&&rate)?round2(sqft*rate):null});
+  }
+  rewriteQuote(spoken).forEach(function(it){if(it.title)items.push(it);});
+  return ensureVertical(items, fields);
+}
+function ensureVertical(items, fields){
+  var list=(items||[]).slice();
+  var vert=numOrNull(fields&&fields.vertical);
+  var vrate=numOrNull(fields&&fields.vrate);
+  var idx=-1,i;
+  for(i=0;i<list.length;i++){
+    if(list[i]&&/^\s*vertical\b/i.test(String(list[i].title||''))){idx=i;break;}
+  }
+  if(!(vert>0&&vrate>0)){
+    if(idx>=0)list.splice(idx,1);
+    return list;
+  }
+  var line={title:'Vertical',detail:formatSq(vert)+' ft at '+money(vrate)+' / ft.',price:round2(vert*vrate)};
+  if(idx>=0)list[idx]=line;
+  else list.push(line);
+  return list;
+}
+function totalOf(items){
+  return round2((items||[]).reduce(function(a,i){return a+(Number(i.price)||0);},0));
+}
+
+function escHtml(s){
+  return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+/* Owner-only fields. Never copy these into a customer email, PDF, or answer page. */
+function customerJob(j){
+  var o;
+  try { o = JSON.parse(JSON.stringify(j||{})); } catch (e) { o = {}; }
+  delete o.hardness;
+  delete o.hardnessHow;
+  delete o.internalNotes;
+  delete o.aiNote;
+  delete o.phone2;
+  delete o.contact2;
+  delete o.callAnswers;
+  delete o.smsReminded;
+  if (Array.isArray(o.items)) {
+    var vis = o.items.filter(function (it) { return !(it && it.internal); });
+    if (vis.length !== o.items.length) {
+      o.items = vis;
+      o.total = totalOf(vis);
+    }
+  }
+  return o;
+}
+function defaultForm() {
+  return {
+    systems: [
+      { name: 'Garage floor flake system', rate: '' },
+      { name: 'Full Flake Broadcast System', rate: '' },
+      { name: 'Acid Stain and Seal', rate: '' },
+      { name: 'Grind and Seal', rate: '' },
+      { name: 'Metallic epoxy', rate: '' },
+      { name: 'Solid color epoxy', rate: '' },
+      { name: 'Polyaspartic system', rate: '' },
+      { name: 'Polyurea garage system', rate: '' },
+      { name: 'Quartz broadcast', rate: '' },
+      { name: 'Pool deck coating', rate: '' },
+      { name: 'Patio and porch coating', rate: '' },
+      { name: 'Commercial kitchen floor', rate: '' },
+      { name: 'Warehouse / industrial floor', rate: '' },
+      { name: 'Concrete sealing', rate: '' },
+      { name: 'Grind and prep only', rate: '' },
+      { name: 'Crack and spall repair', rate: '' }
+    ],
+    colors: ['Dominion', 'Wolf Gray'],
+    addons: [
+      { name: 'Diamond grinding', price: '' },
+      { name: 'Crack repair', price: '' },
+      { name: 'Spall / patch repair', price: '' },
+      { name: 'Moisture mitigation', price: '' },
+      { name: 'Oil stain treatment', price: '' },
+      { name: 'Joint fill', price: '' },
+      { name: 'Coating removal', price: '' }
+    ],
+    fields: [
+      { id: 'talk', label: 'Talk it through', kind: 'talk', show: true, customer: false },
+      { id: 'name', label: 'Customer name', kind: 'text', show: true, customer: true },
+      { id: 'address', label: 'Address', kind: 'text', show: true, customer: true },
+      { id: 'email', label: 'Customer email', kind: 'text', show: true, customer: true },
+      { id: 'phone', label: 'Customer phone', kind: 'text', show: true, customer: false },
+      { id: 'jobType', label: 'Job type', kind: 'jobtype', show: true, customer: false },
+      { id: 'sqft', label: 'Square footage', kind: 'number', show: true, customer: true },
+      { id: 'vertical', label: 'Vertical', kind: 'number', show: true, customer: true },
+      { id: 'vrate', label: 'Vertical cost', kind: 'number', show: true, customer: true },
+      { id: 'system', label: 'Coating system', kind: 'system', show: true, customer: true },
+      { id: 'color', label: 'Color / flake', kind: 'color', show: true, customer: true },
+      { id: 'prep', label: 'Prep', kind: 'prep', show: true, customer: true },
+      { id: 'cure', label: 'Cure / return to service', kind: 'cure', show: true, customer: true },
+      { id: 'rate', label: 'Price per sq ft', kind: 'number', show: true, customer: true },
+      { id: 'hardness', label: 'Concrete hardness (Mohs 1–10)', kind: 'hardness', show: true, customer: false, lock: true },
+      { id: 'photos', label: 'Photo attachments', kind: 'photos', show: true, customer: true },
+      { id: 'quote', label: 'Notes', kind: 'notes', show: true, customer: false },
+      { id: 'addl', label: 'Notes for customer', kind: 'addl', show: true, customer: true },
+      { id: 'inote', label: 'Internal notes', kind: 'inote', show: true, customer: false, lock: true }
+    ]
+  };
+}
+function normalizeForm(saved) {
+  var base = defaultForm();
+  saved = saved && typeof saved === 'object' ? saved : {};
+  function cleanName(s, n) { return String(s || '').trim().slice(0, n || 80); }
+  var systems = Array.isArray(saved.systems) ? saved.systems : base.systems;
+  systems = systems.map(function (s) {
+    if (typeof s === 'string') s = { name: s, rate: '' };
+    var name = cleanName(s && s.name);
+    if (!name) return null;
+    var rate = s.rate == null || s.rate === '' ? '' : String(s.rate).replace(/[^0-9.]/g, '').slice(0, 10);
+    return { name: name, rate: rate };
+  }).filter(Boolean).slice(0, 80);
+  var colors = Array.isArray(saved.colors) ? saved.colors : base.colors;
+  colors = colors.map(function (c) { return cleanName(c, 60); }).filter(Boolean).slice(0, 80);
+  var addons = Array.isArray(saved.addons) ? saved.addons : base.addons;
+  addons = addons.map(function (a) {
+    if (typeof a === 'string') a = { name: a, price: '' };
+    var name = cleanName(a && a.name);
+    if (!name) return null;
+    var price = a.price == null || a.price === '' ? '' : String(a.price).replace(/[^0-9.]/g, '').slice(0, 10);
+    return { name: name, price: price };
+  }).filter(Boolean).slice(0, 80);
+  var defaults = base.fields;
+  var known = {};
+  defaults.forEach(function (f) { known[f.id] = f; });
+  var seen = {};
+  var fields = [];
+  var src = Array.isArray(saved.fields) ? saved.fields : defaults;
+  src.forEach(function (f) {
+    if (!f || !f.id || seen[f.id]) return;
+    var id = cleanName(f.id, 40);
+    var builtin = known[id];
+    var kind = builtin ? builtin.kind : cleanName(f.kind, 20);
+    if (!builtin && ['text', 'number', 'select', 'check', 'price'].indexOf(kind) < 0) kind = 'text';
+    var lock = !!(builtin && builtin.lock) || id === 'hardness' || id === 'inote';
+    var opts = Array.isArray(f.options) ? f.options.map(function (x) { return cleanName(x, 60); }).filter(Boolean).slice(0, 40) : [];
+    fields.push({
+      id: id,
+      label: cleanName(f.label || (builtin && builtin.label) || 'Field', 80),
+      kind: kind,
+      show: f.show === false ? false : true,
+      customer: lock ? false : f.customer !== false && (builtin ? !!builtin.customer : !!f.customer),
+      lock: lock,
+      options: opts,
+      price: f.price == null || f.price === '' ? '' : String(f.price).replace(/[^0-9.]/g, '').slice(0, 10)
+    });
+    seen[id] = 1;
+  });
+  defaults.forEach(function (f) { if (!seen[f.id]) fields.push(JSON.parse(JSON.stringify(f))); });
+  return { systems: systems, colors: colors, addons: addons, fields: fields };
+}
+function formField(form, id) {
+  var list = form && form.fields || [];
+  for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === id) return list[i];
+  return null;
+}
+function customerSees(form, id) {
+  if (id === 'hardness' || id === 'inote' || id === 'hardnessHow') return false;
+  if (!form) return true;
+  var f = formField(form, id);
+  if (!f) return true;
+  if (f.lock || f.show === false || f.customer === false) return false;
+  return true;
+}
+function customerFace(o){
+  o = o || {};
+  return Object.assign({}, o, { job: customerJob(o.job) });
+}
+function specRows(j, form){
+  var defs=[
+    ['sqft','Square footage',j.sqft?formatSq(j.sqft)+' sq ft':''],
+    ['vertical','Vertical',j.vertical?formatSq(j.vertical)+' ft':''],
+    ['vrate','Vertical cost',j.vrate?money(j.vrate)+' / ft':''],
+    ['system','Coating system',j.system||''],
+    ['color','Color / flake',j.color||''],
+    ['prep','Prep',j.prep||''],
+    ['cure','Return to service',j.cure||''],
+    ['rate','Price per sq ft',j.rate?money(j.rate)+' / sq ft':'']
+  ];
+  var rows=[];
+  defs.forEach(function(d){
+    if(!d[2])return;
+    if(form&&!customerSees(form,d[0]))return;
+    var f=formField(form,d[0]);
+    rows.push([(f&&f.label)||d[1], d[2]]);
+  });
+  var custom=(j&&j.custom)||{};
+  ((form&&form.fields)||[]).forEach(function(f){
+    if(!f||defs.some(function(d){return d[0]===f.id;}))return;
+    if(f.kind==='price'||f.kind==='talk'||f.kind==='photos'||f.kind==='notes'||f.kind==='addl'||f.kind==='hardness'||f.kind==='inote'||f.kind==='jobtype'||f.kind==='prep'||f.kind==='system'||f.kind==='color'||f.kind==='cure')return;
+    if(f.show===false||f.customer===false||f.lock)return;
+    var v=custom[f.id];
+    if(f.kind==='check')v=v?'Yes':'';
+    v=String(v==null?'':v).trim();
+    if(!v)return;
+    rows.push([f.label||'Detail', v.slice(0,400)]);
+  });
+  if(!rows.length)return '';
+  return '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:14px;margin:0 0 16px">'+
+    rows.map(function(r){
+      return '<tr><td style="padding:6px 8px;border-bottom:1px solid #e6e8ee;color:#5c6370;width:42%">'+escHtml(r[0])+'</td><td style="padding:6px 8px;border-bottom:1px solid #e6e8ee"><b>'+escHtml(r[1])+'</b></td></tr>';
+    }).join('')+'</table>';
+}
+function itemsTable(j,colors){
+  var dg=colors.dg;
+  var list=j.items||[];
+  if(!list.length)return '';
+  var rows=list.map(function(i,n){
+    return '<tr><td style="padding:10px 8px;border-bottom:1px solid #eef0f4;vertical-align:top;color:#8a8f98">'+(n+1)+'</td>'+
+      '<td style="padding:10px 8px;border-bottom:1px solid #eef0f4"><b>'+escHtml(i.title)+'</b>'+
+      (i.detail?'<br><span style="color:#5c6370;font-size:13px">'+escHtml(i.detail)+'</span>':'')+
+      '</td><td style="padding:10px 8px;border-bottom:1px solid #eef0f4;text-align:right;white-space:nowrap">'+
+      (i.price==null||i.price===''?'Included':money(Number(i.price)))+'</td></tr>';
+  }).join('');
+  var tot=j.total!=null?Number(j.total):totalOf(j.items);
+  return '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:15px">'+
+    '<tr style="background:#f3f4f8"><th style="padding:8px;text-align:left;color:'+dg+'">#</th>'+
+    '<th style="padding:8px;text-align:left;color:'+dg+'">Coating work</th>'+
+    '<th style="padding:8px;text-align:right;color:'+dg+'">Amount</th></tr>'+rows+
+    '<tr><td></td><td style="padding:12px 8px;text-align:right;font-weight:bold">Total</td>'+
+    '<td style="padding:12px 8px;text-align:right;font-size:20px;font-weight:bold;color:'+dg+'">'+money(tot)+'</td></tr></table>';
+}
+function additionalNotesHtml(j, colors){
+  var t=String((j&&j.additionalNotes)||'').trim();
+  if(!t)return '';
+  var n=(colors&&colors.n)||'#3a415c';
+  return '<p style="margin:18px 0 6px"><b style="color:'+n+'">Additional notes</b></p><p style="line-height:1.6;margin:0">'+emailText(t)+'</p>';
+}
+function testBanner(testMode,testTo,customer){
+  if(!testMode)return '';
+  return '<p style="background:#fff3cd;border:1px solid #e0b100;padding:8px 10px;border-radius:8px;font-size:13px;margin:0 0 14px"><b>TEST MODE</b> &mdash; this email would normally go to the customer: '+
+    escHtml(customer||'(no email on the job)')+'. It was sent only to '+escHtml(testTo)+'.</p>';
+}
+function emailShell(o,inner){
+  var n=o.colors.n,dg=o.colors.dg;
+  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#212020">'+
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:'+n+';border-radius:12px 12px 0 0"><tr>'+
+    '<td style="padding:16px 18px;width:200px"><img src="'+o.logoSrc+'" width="180" alt="Southern Concrete Coatings" style="background:#fff;border-radius:8px;padding:4px;display:block"></td>'+
+    '<td style="padding:16px 18px 16px 0;color:#fff"><div style="font-size:18px;font-weight:bold">'+escHtml(o.co.name)+'</div>'+
+    '<div style="color:#d5d8e4;font-size:14px">'+escHtml(o.title)+(o.sub?' &middot; '+escHtml(o.sub):'')+'</div></td></tr></table>'+
+    '<div style="border:1px solid #e1e3ea;border-top:0;padding:22px;border-radius:0 0 12px 12px;background:#fff">'+
+    testBanner(o.testMode,o.testTo,o.job&&o.job.email)+inner+
+    '<hr style="border:0;border-top:1px solid #e6e8ee;margin:22px 0 12px"><p style="color:#5c6370;font-size:12px;line-height:1.6;margin:0"><b style="color:'+n+'">'+escHtml(o.co.legal)+'</b><br>'+
+    escHtml(o.co.addr)+'<br>'+escHtml(o.co.phone)+' &middot; <a href="mailto:'+escHtml(o.testMode?o.testTo:o.co.email)+'" style="color:'+dg+'">'+escHtml(o.testMode?o.testTo:o.co.email)+'</a> &middot; '+
+    '<a href="'+escHtml(o.co.site)+'" style="color:'+dg+'">'+escHtml(o.co.web)+'</a><br>Free estimates &middot; Garage floors, flake, metallic epoxy, and commercial coatings &middot; Tallahassee</p></div></div>';
+}
+function metaBlock(j,label,no,colors){
+  var who=[j.name,j.address,j.email].map(function(s){return String(s||'').trim();}).filter(Boolean);
+  var left=who.length?'<b style="color:'+colors.n+'">Prepared for</b><br>'+who.map(escHtml).join('<br>'):'';
+  var right='<b style="color:'+colors.n+'">'+escHtml(label)+'</b> '+escHtml(no||'');
+  if(j.date) right+='<br>Date: '+escHtml(j.date);
+  if(!left && !String(no||'').trim() && !j.date) return '';
+  return '<table width="100%" style="font-size:14px;margin:0 0 16px"><tr><td style="vertical-align:top">'+left+'</td><td style="vertical-align:top;text-align:right">'+right+'</td></tr></table>';
+}
+function greetLine(word,name){
+  var n=String(name||'').trim();
+  if(!n)return '';
+  return '<p style="font-size:16px">'+word+' '+escHtml(n)+',</p>';
+}
+function emailText(s){
+  return escHtml(s).replace(/\r\n/g,'\n').replace(/\n/g,'<br>');
+}
+var QUOTE_EMAIL_BODY='Thank you for considering Southern Concrete Coatings for your project. We appreciate the opportunity to earn your business and look forward to helping bring your vision to life. Below is the estimate for the coating system we discussed. A PDF copy is attached.';
+var QUOTE_EMAIL_SUBJECT='Your concrete coating estimate from Southern Concrete Coatings - {estimate}';
+var QUOTE_EMAIL_SIGN='Sincerely,\nSouthern Concrete Coatings';
+function quoteEmailCopy(o){
+  o=o||{};
+  var s=o.settings||{};
+  var j=o.job||{};
+  function pick(key,fallback){
+    var v=s[key];
+    v=v==null?'':String(v).replace(/\u0000/g,'').trim();
+    return v||fallback;
+  }
+  function fill(text){
+    return String(text)
+      .replace(/\{name\}/gi,String(j.name||'').trim())
+      .replace(/\{estimate\}/gi,String(j.est||'').trim())
+      .replace(/\{address\}/gi,String(j.address||'').trim());
+  }
+  var sign=QUOTE_EMAIL_SIGN;
+  if(o.co&&o.co.name) sign='Sincerely,\n'+o.co.name;
+  return {
+    body:fill(pick('quoteBody',QUOTE_EMAIL_BODY)),
+    subject:fill(pick('quoteSubject',QUOTE_EMAIL_SUBJECT)).replace(/[\r\n]+/g,' ').trim(),
+    sign:fill(pick('quoteSign',sign))
+  };
+}
+var TERMS=[
+  'This estimate is valid for 30 days from the date above.',
+  'The price is based on the square footage, coating system, and prep described here. If grinding uncovers extra cracks, spalls, or moisture, we stop and price that work before going on.',
+  'Please have vehicles and stored items off the floor before the crew arrives.',
+  'Return-to-service time depends on the system and the temperature. The cure time on this estimate is the plan; we will confirm it on site.',
+  'One-day installations are available on many garage floors. Heavier metallic and commercial systems can take longer.',
+  'Payment is due when the floor is complete, unless the invoice says otherwise.'
+];
+function payButtons(o){
+  var s=o.settings||{}, j=o.job||{}, amt=0;
+  if(j.invoice&&j.invoice.amount!=null&&String(j.invoice.amount)!=='') amt=Number(String(j.invoice.amount).replace(/[^0-9.\-]/g,''))||0;
+  else if(j.total!=null&&j.total!=='') amt=Number(j.total)||0;
+  function linkBtn(href,label,bg){
+    if(!href) return '';
+    return '<a href="'+escHtml(href)+'" style="display:block;margin:8px 0;padding:15px;background:'+bg+';color:#fff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:16px;text-align:center">'+label+'</a>';
+  }
+  var min=s.finMin==null||s.finMin===''?1000:Number(String(s.finMin).replace(/[^0-9.\-]/g,''));
+  if(isNaN(min)) min=1000;
+  var html=linkBtn(s.payLink,'Pay now',o.colors.g);
+  if(s.finLink&&amt>=min) html+=linkBtn(s.finLink,'Pay over time',o.colors.n);
+  return html?'<div style="margin:16px 0">'+html+'</div>':'';
+}
+function quoteEmailHtml(o){
+  o=customerFace(o);
+  var j=o.job,n=o.colors.n;
+  var copy=quoteEmailCopy(o);
+  var inner=greetLine('Dear',j.name)+
+    '<p style="line-height:1.6">'+emailText(copy.body)+'</p>'+
+    metaBlock(j,'Estimate #',j.est,o.colors)+specRows(j, o.settings&&o.settings.form)+itemsTable(j,o.colors)+additionalNotesHtml(j,o.colors)+
+    (o.photosHtml?'<p style="margin:18px 0 6px"><b style="color:'+n+'">Site photos</b></p>'+o.photosHtml:'')+
+    '<p style="font-size:13px;color:#5c6370;line-height:1.6"><b>Terms:</b> '+TERMS.join(' ')+'</p>'+
+    '<p>'+emailText(copy.sign)+'</p>';
+  return emailShell(Object.assign({},o,{title:'Estimate',sub:j.est}),inner);
+}
+function pdfHtml(o){
+  o=customerFace(o);
+  var j=o.job;
+  var inner=metaBlock(j,'Estimate #',j.est,o.colors)+specRows(j, o.settings&&o.settings.form)+itemsTable(j,o.colors)+additionalNotesHtml(j,o.colors)+
+    '<h3 style="color:'+o.colors.n+';margin:22px 0 6px;font-size:15px">Terms</h3><ul style="font-size:13px;color:#33383d;line-height:1.6;padding-left:18px">'+
+    TERMS.map(function(t){return '<li>'+escHtml(t)+'</li>';}).join('')+'</ul>'+
+    '<p style="font-size:13px">To approve, call '+escHtml(o.co.phone)+'.</p>'+
+    '<table width="100%" style="margin-top:28px;font-size:13px"><tr><td>Customer signature: ____________________________</td><td style="text-align:right">Date: ______________</td></tr></table>';
+  return '<html><head><style>@page{margin:28px}body{font-family:Arial,Helvetica,sans-serif}</style></head><body>'+
+    emailShell(Object.assign({},o,{title:'Estimate',sub:j.est,testMode:false}),inner)+'</body></html>';
+}
+function recapEmailHtml(o){
+  o=customerFace(o);
+  var j=o.job,n=o.colors.n,dg=o.colors.dg,g=o.colors.g;
+  var av=[j.response&&j.response.avail,j.response&&j.response.when].filter(Boolean).join(' - ');
+  var referHref='mailto:?subject='+encodeURIComponent('Floor coating I recommend: Southern Concrete Coatings')+
+    '&body='+encodeURIComponent('I used Southern Concrete Coatings in Tallahassee and was happy with the floor. Free estimates: '+o.co.site+' or '+o.co.phone);
+  var refer='<a href="'+referHref+'" style="display:block;padding:15px;background:'+g+';color:#fff;text-decoration:none;border-radius:10px;font-weight:bold;text-align:center;font-size:16px">Refer a neighbor</a>';
+  var where=String(j.address||'').trim();
+  var inner=greetLine('Hi',j.name)+
+    '<p style="line-height:1.6">'+(where?'Your coating at '+escHtml(where)+' is complete.':'Your coating is complete.')+' Here is a look at the floor, before and after.</p>'+
+    specRows(j, o.settings&&o.settings.form)+itemsTable(j,o.colors)+
+    (av?'<p><b style="color:'+n+'">Scheduled from your preference:</b> '+escHtml(av)+'</p>':'')+
+    (j.crewNotes?'<p><b style="color:'+n+'">Crew notes:</b> '+escHtml(j.crewNotes)+'</p>':'')+
+    '<h3 style="color:'+dg+'">Before</h3>'+(o.beforeHtml||'<p style="color:#8a8f98">No photos</p>')+
+    '<h3 style="color:'+dg+'">After</h3>'+(o.afterHtml||'<p style="color:#8a8f98">No photos</p>')+
+    '<p style="line-height:1.6">Thank you for choosing Southern Concrete Coatings. If the floor turned out the way you wanted, we would be grateful if you passed our name to a neighbor.</p>'+refer;
+  return emailShell(Object.assign({},o,{title:'Your floor is done',sub:j.est||''}),inner);
+}
+function invoiceEmailHtml(o){
+  o=customerFace(o);
+  var j=o.job,v=j.invoice||{},inv=String(j.est||j.id).replace('EST','INV');
+  var inner=greetLine('Dear',j.name)+
+    '<p>Thank you for your business. Here is the invoice for the completed coating.</p>'+
+    metaBlock(j,'Invoice #',inv,o.colors)+specRows(j, o.settings&&o.settings.form)+itemsTable(j,o.colors)+
+    '<p style="font-size:18px;text-align:right"><b>Amount due: <span style="color:'+o.colors.dg+'">'+escHtml(v.amount)+'</span></b></p>'+
+    additionalNotesHtml(j,o.colors)+
+    (v.note?'<p>'+escHtml(v.note)+'</p>':'')+
+    payButtons(o)+
+    '<p>Questions? Call '+escHtml(o.co.phone)+'.</p>';
+  return emailShell(Object.assign({},o,{title:'Invoice',sub:inv}),inner);
+}
+function responseFormHtml(o){
+  o=customerFace(o);
+  var j=o.job,ans=o.ans,labels=o.labels,slots=o.slots,action=o.action;
+  var slotHtml=slots.map(function(s,i){
+    return '<label style="display:block;width:100%;margin:8px 0;padding:18px;font-size:19px;font-weight:bold;border:3px solid '+o.colors.n+';background:#fff;color:'+o.colors.n+';border-radius:12px;text-align:center;box-sizing:border-box"><input type="radio" name="avail" value="'+escHtml(s)+'"'+(i===slots.length-1?' checked':'')+' style="margin-right:8px">'+escHtml(s)+'</label>';
+  }).join('');
+  var ask=(ans==='B'||ans==='O')?'<p><b>'+(ans==='B'?'What would you like changed?':'Your question or message:')+'</b></p><textarea name="text" rows="4" style="width:100%;box-sizing:border-box;font-size:17px;padding:14px;border:2px solid #cfd3de;border-radius:10px"></textarea>':'';
+  var where=String(j.address||'').trim();
+  var notes=additionalNotesHtml(j,o.colors);
+  return '<h2 style="color:'+o.colors.n+'">'+escHtml(labels[ans]||ans)+'</h2><p>Estimate '+escHtml(j.est||j.id)+(where?' &middot; '+escHtml(where):'')+'</p>'+
+    (notes?itemsTable(j,o.colors)+notes:'')+
+    '<form method="get" action="'+escHtml(action)+'">'+
+    '<input type="hidden" name="a" value="respond"><input type="hidden" name="id" value="'+escHtml(j.id)+'">'+
+    '<input type="hidden" name="ans" value="'+escHtml(ans)+'"><input type="hidden" name="done" value="1">'+ask+
+    '<p><b>When can the crew have the floor?</b> Tap one. The floor needs to be clear at the start of that window.</p>'+slotHtml+
+    '<p><b>Preferred date or time (optional)</b></p><input type="text" name="when" placeholder="e.g. Tuesday morning" style="width:100%;box-sizing:border-box;font-size:17px;padding:14px;border:2px solid #cfd3de;border-radius:10px">'+
+    '<button style="width:100%;padding:20px;font-size:21px;font-weight:bold;background:'+o.colors.g+';color:#fff;border:0;border-radius:12px;margin-top:14px">Send my answer</button></form>';
+}
+function responseThanksHtml(o){
+  o=customerFace(o);
+  var j=o.job||{}, r=j.response||{};
+  var av=[r.avail,r.when].filter(Boolean).join(' - ');
+  return '<h2 style="color:'+o.colors.dg+'">Thank you</h2><p style="font-size:17px">Your answer was received: <b>'+escHtml(r.label||'')+'</b></p>'+
+    (av?'<p>Preferred time: <b>'+escHtml(av)+'</b></p>':'')+
+    (r.text?'<p>Your note: '+escHtml(r.text)+'</p>':'')+
+    '<p>We will confirm the installation window. Questions? Call '+escHtml(o.co.phone)+'.</p>';
+}
+function reviewEmailHtml(o){
+  o=customerFace(o);
+  var j=o.job||{}, link=(o.settings&&o.settings.reviewLink)||'';
+  var btn=link?'<a href="'+escHtml(link)+'" style="display:block;margin:16px 0;padding:15px;background:'+o.colors.g+';color:#fff;text-decoration:none;border-radius:10px;font-weight:bold;font-size:16px;text-align:center">Leave a review</a>':'';
+  var inner=greetLine('Hi',j.name)+
+    '<p style="line-height:1.6">Thank you for choosing Southern Concrete Coatings. If you were happy with the floor, a short Google review helps neighbors find us.</p>'+
+    btn+'<p>Questions? Call '+escHtml(o.co.phone)+'.</p>';
+  return emailShell(Object.assign({},o,{title:'How did we do?',sub:j.est||''}),inner);
+}
+
+var SCCQuote={
+  round2:round2,money:money,validEmail:validEmail,formatSq:formatSq,
+  deliveryAddress:deliveryAddress,rewriteQuote:rewriteQuote,buildItems:buildItems,totalOf:totalOf,
+  parseSqft:parseSqft,parseRate:parseRate,parseLump:parseLump,parseVertical:parseVertical,parseVerticalRate:parseVerticalRate,ensureVertical:ensureVertical,
+  quoteEmailHtml:quoteEmailHtml,pdfHtml:pdfHtml,recapEmailHtml:recapEmailHtml,invoiceEmailHtml:invoiceEmailHtml,
+  responseFormHtml:responseFormHtml,responseThanksHtml:responseThanksHtml,reviewEmailHtml:reviewEmailHtml,
+  customerJob:customerJob,defaultForm:defaultForm,normalizeForm:normalizeForm,TERMS:TERMS,escHtml:escHtml,
+  QUOTE_EMAIL_BODY:QUOTE_EMAIL_BODY,QUOTE_EMAIL_SUBJECT:QUOTE_EMAIL_SUBJECT,QUOTE_EMAIL_SIGN:QUOTE_EMAIL_SIGN,
+  quoteEmailCopy:quoteEmailCopy
+};
+if(typeof module!=='undefined'&&module.exports)module.exports=SCCQuote;
